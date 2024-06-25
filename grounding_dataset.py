@@ -96,44 +96,6 @@ def load_bfloat16_npy(filepath: str):
     return array
 
 
-# def get_annotations(dirpath, include_event_types):
-#     events = pd.read_csv(os.path.join(dirpath, "events.csv"))
-
-#     use_item_mask = events.key == "use_item"
-#     events["key"] = events.key.where(
-#         ~(use_item_mask & events.value.isin(FOODS)), other="eat_item"
-#     )
-#     events["key"] = events.key.where(
-#         ~(use_item_mask & events.value.isin(TOOLS)), other="use_tool"
-#     )
-#     events["key"] = events.key.where(
-#         ~(events.key == "use_item"), other="place_block"
-#     )
-
-#     annotations = []
-#     prev = None
-#     for row in events.itertuples():
-#         if (
-#             prev is not None
-#             and prev.key == row.key
-#             and prev.value == row.value
-#         ):
-#             annotations[-1][0] = row.t
-#             continue
-
-#         if row.key not in include_event_types:
-#             continue
-
-#         event_name = EVENT_NAMES_PRESENT[row.key]
-#         event_name = event_name[0].upper() + event_name[1:]
-#         item_name = row.value.replace("_", " ")
-#         annotations.append([row.t, f"{event_name} {item_name}."])
-
-#         prev = row
-
-#     return annotations
-
-
 def smoke_test():
     import time
 

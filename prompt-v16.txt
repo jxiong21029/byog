@@ -1,3 +1,0 @@
-[INST] <image>\nDescribe what the player is doing / what actions they take in this clip of Minecraft gameplay.
-Respond with one sentence, like you are giving the player an instruction.
-Be as detailed and specific as possible, but do not mention frame numbers or the name of the game. [/INST]
