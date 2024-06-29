@@ -44,6 +44,6 @@ that BYOL representations are predictive.
 
 Experiment 1:
 1. Input: obs embeds from VPT (because cheap)
-2. Grounding: programmatic annotations (because all we have)
+2. Grounding: GPT observation annotations (because already there)
 3. Encoder: obs -> projector -> pythia
 4. Predictor: stock-standard pythia

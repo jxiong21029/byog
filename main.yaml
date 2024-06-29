@@ -1,0 +1,13 @@
+hydra:
+  run:
+    dir: byog/runs/${oc.env:SLURM_JOB_ID}
+
+defaults:
+  - config_base
+  - _self_
+
+dataset:
+  debug_mode: false
+
+lr: 2e-5
+batch_size: 16
