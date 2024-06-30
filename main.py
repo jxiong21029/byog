@@ -41,10 +41,10 @@ class Model(nn.Module):
             param.requires_grad_(llm_trainable)
 
     def forward(
-        self, obs, txt, output_hidden_states=False, past_key_values=None
+        self, obs, prev_txt, output_hidden_states=False, past_key_values=None
     ):
         obs_embeds = self.encoder_proj(obs)
-        txt_embeds = self.llm.get_input_embeddings()(txt)
+        txt_embeds = self.llm.get_input_embeddings()(prev_txt)
         inputs_embeds = obs_embeds + txt_embeds
 
         outputs = self.llm(
@@ -89,7 +89,7 @@ class Model(nn.Module):
 class Config:
     dataset: ContractorDatasetConfig
 
-    lr: float = 2e-5
+    lr: float = 1e-5
     weight_decay: float = 0.1
     batch_size: int = 32
     valid_size: float = 0.99
@@ -179,7 +179,9 @@ class Trainer:
 
         self.seri.tick("encoder_forward")
         encoder_out = self.model(
-            batch.obs_embeds, txt, output_hidden_states=True
+            obs=batch.obs_embeds,
+            prev_txt=self.model.add_bos(txt[:, :-1]),
+            output_hidden_states=True,
         )
 
         if valid:

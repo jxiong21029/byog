@@ -7,6 +7,8 @@ defaults:
   - _self_
 
 dataset:
+  max_size_labeled: 20_000
+  max_size_unlabed: 100_000
   debug_mode: false
 
 lr: 2e-5

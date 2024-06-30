@@ -1,6 +1,7 @@
 import glob
 import logging
 import os
+import random
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -29,6 +30,8 @@ class ContractorDatasetConfig:
     obs_embeds_filename: str = "vpt_bc_house_3x_embeds.npy"
 
     text_tokenizer_name: str = "EleutherAI/pythia-1b"
+    max_size_labeled: int | None = None
+    max_size_unlabed: int | None = None
     debug_mode: bool = False
 
 
@@ -50,9 +53,8 @@ class ContractorDataset(Dataset):
             self.cfg.obs_frameskip * (self.cfg.seq_len_obs - 1) + 1
         )
 
+        rng = random.Random(0)
         self.index = []
-        if cfg.debug_mode:
-            df = df.sample(10)
         for row in ctqdm(
             df.itertuples(), total=len(df), desc="indexing labeled data"
         ):
@@ -64,9 +66,18 @@ class ContractorDataset(Dataset):
             start_t = max(0, row.end_t - self.real_seq_len_obs)
             self.index.append((row.dirpath, start_t, row.annotation))
 
+        max_labeled = 10 if cfg.debug_mode else cfg.max_size_labeled
+        if max_labeled is not None and max_labeled < len(self.index):
+            self.index = rng.sample(self.index, max_labeled)
+        num_labeled = len(self.index)
+        log.info(f"labeled data: {num_labeled:,}")
+
         dirpaths = sorted(glob.glob("data/contractorV3/c??/?????"))
+        rng.shuffle(dirpaths)
         if cfg.debug_mode:
             dirpaths = dirpaths[:10]
+
+        done = False
         for dirpath in ctqdm(dirpaths, desc="indexing unlabed data"):
             with open(os.path.join(dirpath, "len.txt"), "r") as f:
                 length = int(f.read())
@@ -79,6 +90,17 @@ class ContractorDataset(Dataset):
                 0, length - self.real_seq_len_obs, num_segments
             ):
                 self.index.append((dirpath, round(t), None))
+                if (
+                    cfg.max_size_unlabed is not None
+                    and len(self.index) >= cfg.max_size_unlabed + num_labeled
+                ):
+                    done = True
+                    break
+            if done:
+                break
+
+        log.info(f"unlabeled data: {len(self.index) - num_labeled:,}")
+        log.info(f"total data: {len(self.index):,}")
 
     def __len__(self):
         return len(self.index)
