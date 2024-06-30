@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from hydra.core.config_store import ConfigStore
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, random_split
 from transformers import AutoTokenizer
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXForCausalLM
 
@@ -92,7 +92,7 @@ class Config:
     lr: float = 1e-5
     weight_decay: float = 0.1
     batch_size: int = 32
-    valid_size: float = 0.99
+    valid_size: float = 0.01
 
     updates_between_checkpoints: int | None = 1024
     valid_on_checkpoint: bool = True
@@ -119,16 +119,21 @@ class Trainer:
         )
 
         dataset = ContractorDataset(cfg.dataset)
-        labeled_idx = [
-            i for i in range(len(dataset)) if dataset.index[i][2] is not None
-        ]
-        valid_idx = labeled_idx[
-            len(labeled_idx) - round(len(labeled_idx) * cfg.valid_size) :
-        ]
-        valid_idx_set = set(valid_idx)
-        train_idx = [i for i in range(len(dataset)) if i not in valid_idx_set]
-        self.train_dataset = Subset(dataset, train_idx)
-        self.valid_dataset = Subset(dataset, valid_idx)
+        # labeled_idx = [
+        #     i for i in range(len(dataset)) if dataset.index[i][2] is not None
+        # ]
+        # valid_idx = labeled_idx[
+        #     len(labeled_idx) - round(len(labeled_idx) * cfg.valid_size) :
+        # ]
+        # valid_idx_set = set(valid_idx)
+        # train_idx = [i for i in range(len(dataset)) if i not in valid_idx_set]
+        # self.train_dataset = Subset(dataset, train_idx)
+        # self.valid_dataset = Subset(dataset, valid_idx)
+
+        self.train_dataset, self.valid_dataset = random_split(
+            dataset, [1 - cfg.valid_size, cfg.valid_size]
+        )
+
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=cfg.batch_size,
@@ -158,7 +163,7 @@ class Trainer:
             total += p.numel()
         log.info(f"parameters: {trainable=:,} {total=:,}")
 
-    def loss(self, batch: Batch, valid: bool):
+    def loss(self, batch: Batch):
         b, t = batch.obs_embeds.shape[:2]
         assert batch.txt.shape == (b, t)
         assert batch.txt_mask.shape == (b, t)
@@ -167,15 +172,11 @@ class Trainer:
         assert batch.txt.dtype == torch.long
 
         labeled_mask = batch.txt_mask.sum(dim=-1) > 0
-        if valid:
-            assert labeled_mask.all()
-            txt = batch.txt
-        else:
-            self.seri.tick("encoder_generate")
-            txt = self.model.generate(batch.obs_embeds)
-            txt = torch.where(
-                rearrange(labeled_mask, "b -> b 1", b=b), batch.txt, txt
-            )
+        self.seri.tick("encoder_generate")
+        txt = self.model.generate(batch.obs_embeds)
+        txt = torch.where(
+            rearrange(labeled_mask, "b -> b 1", b=b), batch.txt, txt
+        )
 
         self.seri.tick("encoder_forward")
         encoder_out = self.model(
@@ -184,43 +185,52 @@ class Trainer:
             output_hidden_states=True,
         )
 
-        if valid:
-            logits = encoder_out.logits
-        else:
-            self.seri.tick("predictor_forward")
-            prefix_size = self.rng.integers(1, t, size=(b, 1))
-            prefix_size = torch.as_tensor(
-                prefix_size, device=batch.obs_embeds.device
-            )
-            mask = (
-                torch.arange(t, device=batch.obs_embeds.device).repeat(b, 1)
-                < prefix_size
-            )
-            mask = mask.unsqueeze(-1)
-            assert mask.shape == (b, t, 1)
+        self.seri.tick("predictor_forward")
+        prefix_size = self.rng.integers(1, t, size=(b, 1))
+        prefix_size = torch.as_tensor(
+            prefix_size, device=batch.obs_embeds.device
+        )
+        prefix_mask = (
+            torch.arange(t, device=batch.obs_embeds.device).repeat(b, 1)
+            < prefix_size
+        )
+        prefix_mask = prefix_mask.unsqueeze(-1)
+        assert prefix_mask.shape == (b, t, 1)
 
-            encoded_input = self.model.predictor_proj(
-                encoder_out.hidden_states[-1]
-            )
-            prev_outputs = self.model.add_bos(txt[:, :-1])
-            teacher_forcing = self.model.llm.get_input_embeddings()(
-                prev_outputs
-            )
+        encoded_input = self.model.predictor_proj(
+            encoder_out.hidden_states[-1]
+        )
+        prev_outputs = self.model.add_bos(txt[:, :-1])
+        teacher_forcing = self.model.llm.get_input_embeddings()(prev_outputs)
 
-            inputs_embeds = encoded_input * mask + teacher_forcing
+        inputs_embeds = encoded_input * prefix_mask + teacher_forcing
 
-            predictor_out = self.model.llm(inputs_embeds=inputs_embeds)
-            logits = torch.where(
-                rearrange(labeled_mask, "b -> b 1 1"),
-                encoder_out.logits,
-                predictor_out.logits,
-            )
+        predictor_out = self.model.llm(inputs_embeds=inputs_embeds)
+        logits = torch.where(
+            rearrange(labeled_mask, "b -> b 1 1"),
+            encoder_out.logits,
+            predictor_out.logits,
+        )
+        target_probs = F.softmax(encoder_out.logits.detach(), dim=-1)
+        target_probs = torch.where(
+            rearrange(labeled_mask, "b -> b 1 1"),
+            F.one_hot(txt, num_classes=encoder_out.logits.shape[-1]),
+            target_probs,
+        )
 
-        logits = rearrange(logits, "b t h -> (b t) h", b=b, t=t)
-        targets = rearrange(txt, "b t -> (b t)", b=b, t=t)
-        loss = F.cross_entropy(logits, targets, reduction="none")
-        if not valid:
-            loss = loss * ~mask
+        logits = rearrange(logits, "b t v -> (b t) v", b=b, t=t)
+        target_probs = rearrange(target_probs, "b t v -> (b t) v", b=b, t=t)
+        loss = F.cross_entropy(logits, target_probs, reduction="none")
+        loss = rearrange(loss, "(b t) -> b t 1", b=b, t=t)
+        assert loss.shape == prefix_mask.shape
+        loss = loss * ~prefix_mask
+
+        self.seri.push(loss=loss.mean())
+        if labeled_mask.any():
+            self.seri.extend(loss_labeled=loss[labeled_mask].view(-1))
+        if (~labeled_mask).any():
+            self.seri.extend(loss_unlabed=loss[~labeled_mask].view(-1))
+
         return loss.mean()
 
     def run_epoch(self, valid: bool):
@@ -236,8 +246,7 @@ class Trainer:
             for i, batch in enumerate(
                 (ctqdm(loader) if self.accelerator.is_main_process else loader)
             ):
-                loss = self.loss(batch, valid)
-                self.seri.push(loss=loss)
+                loss = self.loss(batch)
                 self.seri.push_vram()
 
                 if valid:

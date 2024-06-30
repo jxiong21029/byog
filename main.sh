@@ -10,4 +10,4 @@
 export PYTHONUNBUFFERED=TRUE
 cd /coc/testnvme/jxiong60/vpt-llm
 
-srun -u python -u -m accelerate.commands.launch --main_process_port 29500 byog/main.py
+srun -u python -u -m accelerate.commands.launch --main_process_port 29501 byog/main.py

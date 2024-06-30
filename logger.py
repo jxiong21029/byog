@@ -68,6 +68,16 @@ class Seri:
             self._buf[os.path.join(self._prefix, k)].push(v)
 
     @enabled_only
+    def extend(self, metrics=None, **kwargs):
+        metrics = {} if metrics is None else metrics
+        for k, v in {**metrics, **kwargs}.items():
+            if hasattr(v, "detach"):
+                v = v.detach().cpu().float().numpy()
+            assert len(v.shape) == 1
+            for entry in v:
+                self._buf[os.path.join(self._prefix, k)].push(float(entry))
+
+    @enabled_only
     def step(self):
         for k, stats in self._buf.items():
             self.data[f"{k}.data"].append(stats.mean())
