@@ -7,31 +7,64 @@ BYOL-inspired self-supervised objective.
 
 ## Motivation
 
-Internet pretraining treats language like an outcome of intelligence, training
-generative models to fit its distribution, and then delivering those language
-models as the final product, e.g. as assistants, chatbots, etc.
+<!-- At a high level, internet pretraining treats language like an outcome of
+intelligence: we train generative models to fit the distribution of these
+outputs, and then deliver those outputs as the final product, e.g. to create
+assistants, chatbots, etc.
 
 However, from a certain perspective, language is more of an intermediary
 representation used to better induce downstream (e.g. embodied) behaviors,
 in yourself (reasoning) or in others (communication).
 
-In particular, if we want agents to generalize, they need to be able to learn
-to explain unexpected phenomena using language.
+The dominant paradigm to leverage language models as an intermediate component
+in some larger system, is, for example, to use a frozen pretrained language
+model as a text encoder to generate embeddings of an input instruction, then
+feeding those embeddings to a downstream neural network policy / controller.
+
+However, leveraging language models as just a slow lookup table for internet
+data or a text encoder is fundamentally different from how language is used and
+learned in humans. In particular, given that language is something that we
+learn to use, then surely there is some kind of objective that 
+
+Instead of next-token prediction,  -->
+
+The idea behind internet pretraining is that, by training with next token
+prediction on text written by humans, language models implicitly learn the
+dynamics which resulted in that language, and thus implicitly learn a
+representation of the world.
+
+To me, this paradigm seems a bit backwards---humans don't learn how the world
+works by getting better at using language. Instead, we use language as an
+_intermediate representation_ in order to better achieve outcomes in the world,
+whether by processing information (reasoning) or by sharing information with
+others (communication).
+
+In particular, a sequence of language tokens is a good representation if it
+contains information useful for predicting future outcomes. This project is
+about applying this principle to learn to generate language conditioned on
+unlabeled sequences of observations. For this purpose, we adapt a traditional
+self-supervised learning algorithm, BYOL (Bootstrap Your Own Latent; Grill et
+al. 2020). In theory, this could enable an agent to learn to use language to
+explain phenomena in unseen domains, improving generalizability.
 
 ## Approach
 
-We're adapting a self-supervised representation learning algorithm, BYOL,
-traditionally used to embed images into a vector representation (which is then
-used by e.g. freezing the encoder, then training a linear probe on the
-representations for image classification).
+BYOL is typically used to embed images into a vector representation, which can
+then used downstream by e.g. freezing the encoder, then training a linear probe
+on the representations for image classification.
 
-In our case, the encoder autoregressively generates a language annotation for a
-visual input (we'll be focusing on video data for now, since it naturally lends
-itself to this autoregressive structure).
+In our case, the encoder autoregressively generates a sequence of discrete
+language tokens conditioned on a visual input (for now, we'll be focusing on
+video inputs, i.e. a sequence of observation tokens, since it naturally lends
+itself to this autoregressive structure). The predictor then takes a prefix of
+the encoder's output logits and predicts the remainder of the generated tokens.
 
-The predictor takes a prefix of the encoder's output logits and predicts the
-remainder of the generated tokens. Essentially, the two "views" used in BYOL
-correspond to the prefix and the entire observation.
+Essentially, the two "views" used in BYOL, which are typically two 
+augmentations of to the same input image, correspond in our case to the prefix
+and the entirety of the observation sequence. The encoder and predictor,
+instead of being an image embedding model (e.g. a CNN or ViT) and an MLP,
+respectively, are now both sequence models---specifically, fine-tuned
+decoder-only transformer language models.
 
 ```
 encoder:
@@ -56,19 +89,22 @@ txt predictions: prd1  prd2  prd3  prd4
 loss = sum_i xent(prd_i, txt_i) for all i where prefix mask == 0
 ```
 
-Combined with co-training on labeled data, this should enable us to learn a
-consistent grounding which is predictive of the input distribution, in the same
-sense that BYOL representations are predictive of their inputs.
+Of course, the learned language representation is only useful if the language
+is "grounded". However, for novel domains without ground-truth annotations,
+"grounded" can be difficult to define, even for human usage of language. (After
+all, people can and do invent new words to describe newly discovered
+phenomena.) Perhaps the best we can do in terms of defining "grounded" is
+"consistent with how language is used in other cases", which we can enforce by
+simply co-training the model on data with ground-truth annotations. Here,
+"consistency" arises from implicit or explicit regularization of neural
+networks towards smoothness.
 
-We're using a BYOL-like objective due to properties of BYOL-like / JEPA-like
-algorithms which are difficult to explain in detail here. To summarize,
-contrastive approaches no longer make sense since traditional distance
-functions (e.g. Euclidean, KL) don't work as well for sequential
-representations. Meanwhile, reconstruction-based losses do not provide more
-signal than BYOL (source: trust me bro) but require the parameterization and
-training of an expensive decoder, which we want to avoid.
-
-## TODO
-
-1. Generate obs sequences from trained model
-2. Add LoRA for the LLM. Can we do separate matrices for encoder and predictor?
+We're using a BYOL-like objective due to theoretical properties of BYOL-like
+algorithms which are difficult to explain in detail here. As a quick overview,
+the reason to choose BYOL rather than contrastive algorithms is that distance
+functions (e.g. Euclidean, KL / cross-entropy) used in typical contrastive
+approaches for learning vector-valued representations don't make quite as much
+sense for our representations, which are sequences of discrete tokens.
+Meanwhile, reconstruction-based representation learning approaches do not
+provide more signal than BYOL (source: trust me bro) but require the
+parameterization and training of a decoder, which we want to avoid.
