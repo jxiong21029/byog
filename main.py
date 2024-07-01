@@ -21,33 +21,65 @@ from byog.logger import Seri, ctqdm
 log = logging.getLogger(__name__)
 
 
-class Model(nn.Module):
-    def __init__(self, llm_trainable=False, zero_init_projector=True):
-        super().__init__()
-        self.llm = GPTNeoXForCausalLM.from_pretrained("EleutherAI/pythia-1b")
-        self.tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-1b")
-        self.encoder_proj = nn.Linear(256, self.llm.config.hidden_size)
-        self.predictor_proj = nn.Linear(
-            self.llm.config.hidden_size, self.llm.config.hidden_size
-        )
+@dataclass
+class Config:
+    dataset: ContractorDatasetConfig
 
-        if zero_init_projector:
-            with torch.no_grad():
-                self.encoder_proj.weight.zero_()
-                self.encoder_proj.bias.zero_()
-                self.predictor_proj.weight.zero_()
-                self.predictor_proj.bias.zero_()
-        for param in self.llm.parameters():
-            param.requires_grad_(llm_trainable)
+    encoder_llm_name: str = "EleutherAI/pythia-1b"
+    predictor_llm_name: str = "EleutherAI/pythia-1b"
+    encoder_llm_trainable: bool = True
+    predictor_llm_trainable: bool = True
+
+    encoder_lr: float = 1e-5
+    predictor_lr: float = 1e-5
+    weight_decay: float = 0.1
+    batch_size: int = 32
+    valid_size: float = 0.01
+    epochs: int = 3
+
+    updates_between_checkpoints: int | None = 1024
+    valid_on_checkpoint: bool = True
+    checkpoint_best_key: str | None = "valid/loss.data"
+
+
+cs = ConfigStore.instance()
+cs.store(name="config_base", node=Config)
+
+
+class Model(nn.Module):
+    def __init__(self, cfg: Config):
+        super().__init__()
+        self.encoder_llm = GPTNeoXForCausalLM.from_pretrained(
+            cfg.encoder_llm_name
+        )
+        self.predictor_llm = GPTNeoXForCausalLM.from_pretrained(
+            cfg.predictor_llm_name
+        )
+        self.encoder_proj = nn.Linear(256, self.encoder_llm.config.hidden_size)
+        self.predictor_proj = nn.Linear(
+            self.encoder_llm.config.hidden_size,
+            self.predictor_llm.config.hidden_size,
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-1b")
+
+        with torch.no_grad():
+            self.encoder_proj.weight.zero_()
+            self.encoder_proj.bias.zero_()
+            self.predictor_proj.weight.zero_()
+            self.predictor_proj.bias.zero_()
+        for param in self.encoder_llm.parameters():
+            param.requires_grad_(cfg.encoder_llm_trainable)
+        for param in self.predictor_llm.parameters():
+            param.requires_grad_(cfg.predictor_llm_trainable)
 
     def forward(
         self, obs, prev_txt, output_hidden_states=False, past_key_values=None
     ):
         obs_embeds = self.encoder_proj(obs)
-        txt_embeds = self.llm.get_input_embeddings()(prev_txt)
+        txt_embeds = self.encoder_llm.get_input_embeddings()(prev_txt)
         inputs_embeds = obs_embeds + txt_embeds
 
-        outputs = self.llm(
+        outputs = self.encoder_llm(
             inputs_embeds=inputs_embeds,
             past_key_values=past_key_values,
             output_hidden_states=output_hidden_states,
@@ -65,7 +97,13 @@ class Model(nn.Module):
         tokens = []
         past_key_values = None
         for t in range(length):
-            outputs = self(obs[:, t : t + 1], last, past_key_values)
+            outputs = self(
+                obs=obs[:, t : t + 1],
+                prev_txt=last,
+                output_hidden_states=False,
+                past_key_values=past_key_values,
+            )
+            past_key_values = outputs.past_key_values
 
             probs = F.softmax(outputs.logits[:, -1], dim=-1)
             last = torch.multinomial(probs, num_samples=1)
@@ -85,24 +123,6 @@ class Model(nn.Module):
         )
 
 
-@dataclass
-class Config:
-    dataset: ContractorDatasetConfig
-
-    lr: float = 1e-5
-    weight_decay: float = 0.1
-    batch_size: int = 32
-    valid_size: float = 0.01
-
-    updates_between_checkpoints: int | None = 1024
-    valid_on_checkpoint: bool = True
-    checkpoint_best_key: str | None = "valid/loss.data"
-
-
-cs = ConfigStore.instance()
-cs.store(name="config_base", node=Config)
-
-
 class Trainer:
     def __init__(self, cfg: Config, out_dirpath: str):
         self.cfg = cfg
@@ -112,10 +132,29 @@ class Trainer:
         self.seri = Seri(accelerator=self.accelerator, main_process_only=True)
         self.best_checkpoint_value = None
 
-        model = Model()
+        model = Model(cfg)
 
         optim = torch.optim.AdamW(
-            model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+            [
+                {
+                    "params": model.encoder_proj.parameters(),
+                    "lr": cfg.encoder_lr,
+                },
+                {
+                    "params": model.encoder_llm.parameters(),
+                    "lr": cfg.encoder_lr,
+                },
+                {
+                    "params": model.predictor_proj.parameters(),
+                    "lr": cfg.predictor_lr,
+                },
+                {
+                    "params": model.predictor_llm.parameters(),
+                    "lr": cfg.predictor_lr,
+                },
+            ],
+            lr=cfg.encoder_lr,
+            weight_decay=cfg.weight_decay,
         )
 
         dataset = ContractorDataset(cfg.dataset)
@@ -132,6 +171,9 @@ class Trainer:
 
         self.train_dataset, self.valid_dataset = random_split(
             dataset, [1 - cfg.valid_size, cfg.valid_size]
+        )
+        log.info(
+            f"train size: {len(self.train_dataset):,}, valid size: {len(self.valid_dataset):,}"
         )
 
         train_loader = DataLoader(
@@ -172,11 +214,14 @@ class Trainer:
         assert batch.txt.dtype == torch.long
 
         labeled_mask = batch.txt_mask.sum(dim=-1) > 0
-        self.seri.tick("encoder_generate")
-        txt = self.model.generate(batch.obs_embeds)
-        txt = torch.where(
-            rearrange(labeled_mask, "b -> b 1", b=b), batch.txt, txt
-        )
+        if (~labeled_mask).any():
+            self.seri.tick("encoder_generate")
+            txt = self.model.generate(batch.obs_embeds)
+            txt = torch.where(
+                rearrange(labeled_mask, "b -> b 1", b=b), batch.txt, txt
+            )
+        else:
+            txt = batch.txt
 
         self.seri.tick("encoder_forward")
         encoder_out = self.model(
@@ -201,11 +246,13 @@ class Trainer:
             encoder_out.hidden_states[-1]
         )
         prev_outputs = self.model.add_bos(txt[:, :-1])
-        teacher_forcing = self.model.llm.get_input_embeddings()(prev_outputs)
+        teacher_forcing = self.model.predictor_llm.get_input_embeddings()(
+            prev_outputs
+        )
 
         inputs_embeds = encoded_input * prefix_mask + teacher_forcing
 
-        predictor_out = self.model.llm(inputs_embeds=inputs_embeds)
+        predictor_out = self.model.predictor_llm(inputs_embeds=inputs_embeds)
         logits = torch.where(
             rearrange(labeled_mask, "b -> b 1 1"),
             encoder_out.logits,
@@ -225,7 +272,22 @@ class Trainer:
         assert loss.shape == prefix_mask.shape
         loss = loss * ~prefix_mask
 
-        self.seri.push(loss=loss.mean())
+        with torch.no_grad():
+            self.seri.push(
+                loss=loss.mean(),
+                encoder_entropy=torch.distributions.Categorical(
+                    logits=rearrange(encoder_out.logits, "b t v -> (b t) v")
+                )
+                .entropy()
+                .mean(),
+                predictor_entropy=torch.distributions.Categorical(
+                    logits=rearrange(predictor_out.logits, "b t v -> (b t) v")
+                )
+                .entropy()
+                .mean(),
+                encoder_proj_weight_std=self.model.encoder_proj.weight.std(),
+                predictor_proj_weight_std=self.model.predictor_proj.weight.std(),
+            )
         if labeled_mask.any():
             self.seri.extend(loss_labeled=loss[labeled_mask].view(-1))
         if (~labeled_mask).any():
@@ -308,7 +370,7 @@ def main(cfg: Config):
     trainer.log_param_info()
 
     trainer.run_epoch(valid=True)
-    for _ in range(3):
+    for _ in range(cfg.epochs):
         trainer.run_epoch(valid=False)
 
 

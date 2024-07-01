@@ -77,8 +77,10 @@ class ContractorDataset(Dataset):
         if cfg.debug_mode:
             dirpaths = dirpaths[:10]
 
-        done = False
+        done = cfg.max_size_unlabed == 0
         for dirpath in ctqdm(dirpaths, desc="indexing unlabed data"):
+            if done:
+                break
             with open(os.path.join(dirpath, "len.txt"), "r") as f:
                 length = int(f.read())
 
@@ -96,8 +98,6 @@ class ContractorDataset(Dataset):
                 ):
                     done = True
                     break
-            if done:
-                break
 
         log.info(f"unlabeled data: {len(self.index) - num_labeled:,}")
         log.info(f"total data: {len(self.index):,}")
