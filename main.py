@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from hydra.core.config_store import ConfigStore
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from transformers import AutoTokenizer
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXForCausalLM
 
@@ -30,11 +30,13 @@ class Config:
     encoder_llm_trainable: bool = True
     predictor_llm_trainable: bool = True
 
+    labeled_valid_size: float = 0.01
+    unlabed_valid_size: float = 0.01
+
     encoder_lr: float = 1e-5
     predictor_lr: float = 1e-5
     weight_decay: float = 0.1
     batch_size: int = 32
-    valid_size: float = 0.01
     epochs: int = 3
 
     updates_between_checkpoints: int | None = 1024
@@ -158,22 +160,71 @@ class Trainer:
         )
 
         dataset = ContractorDataset(cfg.dataset)
-        # labeled_idx = [
-        #     i for i in range(len(dataset)) if dataset.index[i][2] is not None
-        # ]
-        # valid_idx = labeled_idx[
-        #     len(labeled_idx) - round(len(labeled_idx) * cfg.valid_size) :
-        # ]
-        # valid_idx_set = set(valid_idx)
-        # train_idx = [i for i in range(len(dataset)) if i not in valid_idx_set]
-        # self.train_dataset = Subset(dataset, train_idx)
-        # self.valid_dataset = Subset(dataset, valid_idx)
+        labeled_idx = [
+            i for i in range(len(dataset)) if dataset.index[i][2] is not None
+        ]
+        labeled_idx_set = set(labeled_idx)
+        unlabed_idx = [
+            i for i in range(len(dataset)) if i not in labeled_idx_set
+        ]
 
-        self.train_dataset, self.valid_dataset = random_split(
-            dataset, [1 - cfg.valid_size, cfg.valid_size]
+        valid_labeled_idx = self.rng.choice(
+            labeled_idx,
+            round(cfg.labeled_valid_size * len(labeled_idx)),
+            replace=False,
+        ).tolist()
+        valid_unlabed_idx = self.rng.choice(
+            unlabed_idx,
+            round(cfg.unlabed_valid_size * len(unlabed_idx)),
+            replace=False,
+        ).tolist()
+        valid_labeled_idx_set = set(valid_labeled_idx)
+        valid_unlabed_idx_set = set(valid_unlabed_idx)
+        train_labeled_idx = [
+            i for i in labeled_idx if i not in valid_labeled_idx_set
+        ]
+        train_unlabed_idx = [
+            i for i in unlabed_idx if i not in valid_unlabed_idx_set
+        ]
+        # Sanity check
+        assert len(
+            valid_labeled_idx_set.union(valid_unlabed_idx_set)
+            .union(train_labeled_idx)
+            .union(train_unlabed_idx)
+        ) == len(dataset)
+
+        log.info(
+            f"TOTAL labeled size: {len(labeled_idx):,}, "
+            f"unlabed size: {len(unlabed_idx):,}, "
+            f"total: {len(labeled_idx) + len(unlabed_idx)}"
         )
         log.info(
-            f"train size: {len(self.train_dataset):,}, valid size: {len(self.valid_dataset):,}"
+            f"TRAIN labeled size: {len(train_labeled_idx):,}, "
+            f"unlabed size: {len(train_unlabed_idx):,}, "
+            f"total: {len(train_labeled_idx) + len(train_unlabed_idx)}"
+        )
+        log.info(
+            f"VALID labeled size: {len(valid_labeled_idx):,}, "
+            f"unlabed size: {len(valid_unlabed_idx):,}, "
+            f"total: {len(valid_labeled_idx) + len(valid_unlabed_idx)}"
+        )
+
+        self.train_dataset = Subset(
+            dataset, train_labeled_idx + train_unlabed_idx
+        )
+        self.valid_dataset = Subset(
+            dataset, valid_labeled_idx + valid_unlabed_idx
+        )
+
+        # Better safe than sorry
+        assert len(self.train_dataset) == len(train_labeled_idx) + len(
+            train_unlabed_idx
+        )
+        assert len(self.valid_dataset) == len(valid_labeled_idx) + len(
+            valid_unlabed_idx
+        )
+        assert len(self.train_dataset) + len(self.valid_dataset) == len(
+            dataset
         )
 
         train_loader = DataLoader(
@@ -347,9 +398,10 @@ class Trainer:
             or self.seri.data[self.cfg.checkpoint_best_key][-1]
             < self.best_checkpoint_value
         ):
-            self.best_checkpoint_value = self.seri.data[
-                self.cfg.checkpoint_best_key
-            ][-1]
+            if self.cfg.checkpoint_best_key is not None:
+                self.best_checkpoint_value = self.seri.data[
+                    self.cfg.checkpoint_best_key
+                ][-1]
 
             self.accelerator.save_model(
                 self.model,
