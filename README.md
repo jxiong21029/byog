@@ -5,7 +5,7 @@
 Learning a language representation of a visual input stream using a
 BYOL-inspired self-supervised objective.
 
-## Motivation
+<!-- ## Motivation -->
 
 <!-- At a high level, internet pretraining treats language like an outcome of
 intelligence: we train generative models to fit the distribution of these
@@ -28,7 +28,7 @@ learn to use, then surely there is some kind of objective that
 
 Instead of next-token prediction,  -->
 
-The idea behind internet pretraining is that, by training with next token
+<!-- The idea behind internet pretraining is that, by training with next token
 prediction on text written by humans, language models implicitly learn the
 dynamics which resulted in that language, and thus implicitly learn a
 representation of the world.
@@ -45,7 +45,7 @@ about applying this principle to learn to generate language conditioned on
 unlabeled sequences of observations. For this purpose, we adapt a traditional
 self-supervised learning algorithm, BYOL (Bootstrap Your Own Latent; Grill et
 al. 2020). In theory, this could enable an agent to learn to use language to
-explain phenomena in unseen domains, improving generalizability.
+explain phenomena in unseen domains, improving generalizability. -->
 
 ## Approach
 
@@ -53,11 +53,10 @@ BYOL is typically used to embed images into a vector representation, which can
 then used downstream by e.g. freezing the encoder, then training a linear probe
 on the representations for image classification.
 
-In our case, the encoder autoregressively generates a sequence of discrete
-language tokens conditioned on a visual input (for now, we'll be focusing on
-video inputs, i.e. a sequence of observation tokens, since it naturally lends
-itself to this autoregressive structure). The predictor then takes a prefix of
-the encoder's output logits and predicts the remainder of the generated tokens.
+For this project, the encoder instead autoregressively generates a sequence of
+discrete language tokens conditioned on a stream of visual observations. The
+predictor then takes a prefix of the encoder's output logits and predicts the
+remainder of the generated tokens.
 
 Essentially, the two "views" used in BYOL, which are typically two 
 augmentations of to the same input image, correspond in our case to the prefix
@@ -89,7 +88,7 @@ txt predictions: prd1  prd2  prd3  prd4
 loss = sum_i xent(prd_i, txt_i) for all i where prefix mask == 0
 ```
 
-Of course, the learned language representation is only useful if the language
+<!-- Of course, the learned language representation is only useful if the language
 is "grounded". However, for novel domains without ground-truth annotations,
 "grounded" can be difficult to define, even for human usage of language. (After
 all, people can and do invent new words to describe newly discovered
@@ -97,7 +96,7 @@ phenomena.) Perhaps the best we can do in terms of defining "grounded" is
 "consistent with how language is used in other cases", which we can enforce by
 simply co-training the model on data with ground-truth annotations. Here,
 "consistency" arises from implicit or explicit regularization of neural
-networks towards smoothness.
+networks towards smoothness. -->
 
 We're using a BYOL-like objective due to theoretical properties of BYOL-like
 algorithms which are difficult to explain in detail here. As a quick overview,

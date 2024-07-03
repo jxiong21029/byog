@@ -7,8 +7,8 @@ defaults:
   - _self_
 
 dataset:
-  max_size_labeled: null
-  max_size_unlabed: null
+  max_size_labeled: 5_000
+  max_size_unlabed: 0
   debug_mode: false
 
 encoder_llm_name: "EleutherAI/pythia-160m"
@@ -16,10 +16,13 @@ predictor_llm_name: "EleutherAI/pythia-160m"
 encoder_llm_trainable: true
 predictor_llm_trainable: true
 
-encoder_lr: 1e-5
+labeled_valid_size: 0.9
+unlabed_valid_size: 0.01
+
+encoder_lr: 5e-5
 predictor_lr: 5e-5
 weight_decay: 0.05
 batch_size: 16
-epochs: 6
+epochs: 5
 
-checkpoint_best_key: "valid/loss_labeled.data"
+checkpoint_best_key: null
