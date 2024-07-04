@@ -32,6 +32,10 @@ class ContractorDatasetConfig:
 
     text_tokenizer_name: str = "EleutherAI/pythia-1b"
 
+    # Surrounding the annotation in emdashes might make the output more
+    # coherent
+    text_format: str = "---{annotation}---"
+
 
 class ContractorDataset(Dataset):
     def __init__(self, cfg: ContractorDatasetConfig):
@@ -97,7 +101,10 @@ class ContractorDataset(Dataset):
         txt_mask = np.zeros(self.cfg.seq_len, dtype=bool)
 
         for midpoint_t, annotation in self.episode_annotations[dirpath]:
-            tokens = self.text_tokenizer.encode(annotation)
+            formatted = self.cfg.text_format.format(
+                annotation=annotation.rstrip(".")
+            )
+            tokens = self.text_tokenizer.encode(formatted)
             txt_mid_idx = (midpoint_t - start_t) // self.cfg.frameskip
             txt_start_idx = txt_mid_idx - len(tokens) // 2
             txt_stop_idx = txt_start_idx + len(tokens)
