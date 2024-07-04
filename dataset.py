@@ -1,7 +1,8 @@
 import glob
 import logging
 import os
-import random
+import warnings
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -24,15 +25,12 @@ class Batch(NamedTuple):
 
 @dataclass
 class ContractorDatasetConfig:
-    seq_len_obs: int = 32
-    obs_frameskip: int = 8
-    seq_len_txt: int = 32
+    seq_len: int = 64
+    frameskip: int = 4
+    data_dirpaths: str = "data/contractorV3/c??/?????/"
     obs_embeds_filename: str = "vpt_bc_house_3x_embeds.npy"
 
     text_tokenizer_name: str = "EleutherAI/pythia-1b"
-    max_size_labeled: int | None = None
-    max_size_unlabed: int | None = None
-    debug_mode: bool = False
 
 
 class ContractorDataset(Dataset):
@@ -49,83 +47,64 @@ class ContractorDataset(Dataset):
             "annotation",
         ]
 
-        self.real_seq_len_obs = (
-            self.cfg.obs_frameskip * (self.cfg.seq_len_obs - 1) + 1
-        )
+        self.real_seq_len = self.cfg.frameskip * (self.cfg.seq_len - 1) + 1
 
-        rng = random.Random(0)
-        self.index = []
+        self.episode_annotations = defaultdict(list)
         for row in ctqdm(
-            df.itertuples(), total=len(df), desc="indexing labeled data"
+            df.itertuples(), total=len(df), desc="indexing annotations"
         ):
             with open(os.path.join(row.dirpath, "len.txt"), "r") as f:
                 length = int(f.read())
-            if length < self.real_seq_len_obs:
+            if length < self.real_seq_len:
                 continue
 
-            start_t = max(0, row.end_t - self.real_seq_len_obs)
-            self.index.append((row.dirpath, start_t, row.annotation))
+            self.episode_annotations[row.dirpath].append(
+                ((row.start_t + row.end_t) // 2, row.annotation)
+            )
 
-        max_labeled = 10 if cfg.debug_mode else cfg.max_size_labeled
-        if max_labeled is not None and max_labeled < len(self.index):
-            self.index = rng.sample(self.index, max_labeled)
-        num_labeled = len(self.index)
-        log.info(f"labeled data: {num_labeled:,}")
+        self.index = []
+        dirpaths = [
+            os.path.normpath(dirpath)
+            for dirpath in sorted(glob.glob(cfg.data_dirpaths))
+        ]
+        for dirpath in self.episode_annotations.keys():
+            if dirpath not in dirpaths:
+                warnings.warn(f"{dirpath=} not found")
 
-        dirpaths = sorted(glob.glob("data/contractorV3/c??/?????"))
-        rng.shuffle(dirpaths)
-        if cfg.debug_mode:
-            dirpaths = dirpaths[:10]
-
-        done = cfg.max_size_unlabed == 0
-        for dirpath in ctqdm(dirpaths, desc="indexing unlabed data"):
-            if done:
-                break
+        for dirpath in ctqdm(dirpaths, desc="indexing episodes"):
             with open(os.path.join(dirpath, "len.txt"), "r") as f:
                 length = int(f.read())
-
-            if length < self.real_seq_len_obs:
+            if length < self.real_seq_len:
                 continue
+            num_segments = round(length / self.real_seq_len)
 
-            num_segments = round(length / self.real_seq_len_obs)
-            for t in np.linspace(
-                0, length - self.real_seq_len_obs, num_segments
-            ):
-                self.index.append((dirpath, round(t), None))
-                if (
-                    cfg.max_size_unlabed is not None
-                    and len(self.index) >= cfg.max_size_unlabed + num_labeled
-                ):
-                    done = True
-                    break
-
-        log.info(f"unlabeled data: {len(self.index) - num_labeled:,}")
-        log.info(f"total data: {len(self.index):,}")
+            for t in np.linspace(0, length - self.real_seq_len, num_segments):
+                self.index.append((dirpath, round(t)))
 
     def __len__(self):
         return len(self.index)
 
     def __getitem__(self, index):
-        dirpath, start_t, annotation = self.index[index]
+        dirpath, start_t = self.index[index]
 
         obs_embeds = load_bfloat16_npy(
             os.path.join(dirpath, self.cfg.obs_embeds_filename)
         ).astype(np.float32)[
-            start_t : start_t + self.real_seq_len_obs : self.cfg.obs_frameskip
+            start_t : start_t + self.real_seq_len : self.cfg.frameskip
         ]
 
-        txt = (
-            self.text_tokenizer.encode(annotation)[: self.cfg.seq_len_txt]
-            if annotation is not None
-            else []
-        )
-        txt = np.array(txt, dtype=np.int64)
-        txt_mask = np.zeros(self.cfg.seq_len_txt, dtype=bool)
-        txt_mask[: len(txt)] = True
-        txt = np.concatenate(
-            [txt, np.zeros_like(txt, shape=self.cfg.seq_len_txt - len(txt))],
-            axis=0,
-        )
+        txt = np.zeros(self.cfg.seq_len, dtype=np.int64)
+        txt_mask = np.zeros(self.cfg.seq_len, dtype=bool)
+
+        for midpoint_t, annotation in self.episode_annotations[dirpath]:
+            tokens = self.text_tokenizer.encode(annotation)
+            txt_mid_idx = (midpoint_t - start_t) // self.cfg.frameskip
+            txt_start_idx = txt_mid_idx - len(tokens) // 2
+            txt_stop_idx = txt_start_idx + len(tokens)
+
+            for i in range(max(0, txt_start_idx), min(txt_stop_idx, len(txt))):
+                txt[i] = tokens[i - txt_start_idx]
+                txt_mask[i] = True
 
         return Batch(obs_embeds=obs_embeds, txt=txt, txt_mask=txt_mask)
 
@@ -147,3 +126,18 @@ def load_bfloat16_npy(filepath: str):
     else:
         array.shape = shape
     return array
+
+
+if __name__ == "__main__":
+    dataset = ContractorDataset(ContractorDatasetConfig())
+    print(f"{len(dataset)=}")
+
+    found = False
+    for i in range(len(dataset)):
+        if dataset.index[i][0] == "data/contractorV3/c10/00076":
+            traj = dataset[i]
+            print(i, dataset.index[i])
+            print("".join("1" if x else "0" for x in traj.txt_mask))
+            print(dataset.text_tokenizer.decode(traj.txt[traj.txt_mask]))
+            found = True
+    print(found)

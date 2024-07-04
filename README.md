@@ -1,51 +1,11 @@
 # BYOG: Bootstrap Your Own Grounding
 
+Project name is a work-in-progress.
+
 ## TL;DR
 
 Learning a language representation of a visual input stream using a
 BYOL-inspired self-supervised objective.
-
-<!-- ## Motivation -->
-
-<!-- At a high level, internet pretraining treats language like an outcome of
-intelligence: we train generative models to fit the distribution of these
-outputs, and then deliver those outputs as the final product, e.g. to create
-assistants, chatbots, etc.
-
-However, from a certain perspective, language is more of an intermediary
-representation used to better induce downstream (e.g. embodied) behaviors,
-in yourself (reasoning) or in others (communication).
-
-The dominant paradigm to leverage language models as an intermediate component
-in some larger system, is, for example, to use a frozen pretrained language
-model as a text encoder to generate embeddings of an input instruction, then
-feeding those embeddings to a downstream neural network policy / controller.
-
-However, leveraging language models as just a slow lookup table for internet
-data or a text encoder is fundamentally different from how language is used and
-learned in humans. In particular, given that language is something that we
-learn to use, then surely there is some kind of objective that 
-
-Instead of next-token prediction,  -->
-
-<!-- The idea behind internet pretraining is that, by training with next token
-prediction on text written by humans, language models implicitly learn the
-dynamics which resulted in that language, and thus implicitly learn a
-representation of the world.
-
-To me, this paradigm seems a bit backwards---humans don't learn how the world
-works by getting better at using language. Instead, we use language as an
-_intermediate representation_ in order to better achieve outcomes in the world,
-whether by processing information (reasoning) or by sharing information with
-others (communication).
-
-In particular, a sequence of language tokens is a good representation if it
-contains information useful for predicting future outcomes. This project is
-about applying this principle to learn to generate language conditioned on
-unlabeled sequences of observations. For this purpose, we adapt a traditional
-self-supervised learning algorithm, BYOL (Bootstrap Your Own Latent; Grill et
-al. 2020). In theory, this could enable an agent to learn to use language to
-explain phenomena in unseen domains, improving generalizability. -->
 
 ## Approach
 
@@ -87,16 +47,6 @@ txt predictions: prd1  prd2  prd3  prd4
 
 loss = sum_i xent(prd_i, txt_i) for all i where prefix mask == 0
 ```
-
-<!-- Of course, the learned language representation is only useful if the language
-is "grounded". However, for novel domains without ground-truth annotations,
-"grounded" can be difficult to define, even for human usage of language. (After
-all, people can and do invent new words to describe newly discovered
-phenomena.) Perhaps the best we can do in terms of defining "grounded" is
-"consistent with how language is used in other cases", which we can enforce by
-simply co-training the model on data with ground-truth annotations. Here,
-"consistency" arises from implicit or explicit regularization of neural
-networks towards smoothness. -->
 
 We're using a BYOL-like objective due to theoretical properties of BYOL-like
 algorithms which are difficult to explain in detail here. As a quick overview,

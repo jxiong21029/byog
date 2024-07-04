@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from hydra.core.config_store import ConfigStore
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, random_split
 from transformers import AutoTokenizer
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXForCausalLM
 
@@ -23,15 +23,14 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    dataset: ContractorDatasetConfig
+    dataset: ContractorDatasetConfig = ContractorDatasetConfig()
 
     encoder_llm_name: str = "EleutherAI/pythia-1b"
     predictor_llm_name: str = "EleutherAI/pythia-1b"
     encoder_llm_trainable: bool = True
     predictor_llm_trainable: bool = True
 
-    labeled_valid_size: float = 0.01
-    unlabed_valid_size: float = 0.01
+    valid_size: float = 0.01
 
     encoder_lr: float = 1e-5
     predictor_lr: float = 1e-5
@@ -79,6 +78,8 @@ class Model(nn.Module):
     ):
         obs_embeds = self.encoder_proj(obs)
         txt_embeds = self.encoder_llm.get_input_embeddings()(prev_txt)
+        assert obs_embeds.shape == txt_embeds.shape
+
         inputs_embeds = obs_embeds + txt_embeds
 
         outputs = self.encoder_llm(
@@ -89,10 +90,13 @@ class Model(nn.Module):
         return outputs
 
     @torch.inference_mode()
-    def generate(self, obs):
+    def generate(self, obs, txt, txt_mask):
         """Samples obs-conditioned sequences"""
 
         bsize, length = obs.shape[:2]
+        assert txt.shape == (bsize, length)
+        assert txt_mask.shape == (bsize, length)
+
         last = torch.as_tensor(
             self.tokenizer.bos_token_id, device=obs.device
         ).repeat(bsize, 1)
@@ -109,6 +113,7 @@ class Model(nn.Module):
 
             probs = F.softmax(outputs.logits[:, -1], dim=-1)
             last = torch.multinomial(probs, num_samples=1)
+            last = torch.where(txt_mask[:, t : t + 1], txt[:, t : t + 1], last)
             tokens.append(last)
 
         return torch.cat(tokens, dim=1)
@@ -160,71 +165,12 @@ class Trainer:
         )
 
         dataset = ContractorDataset(cfg.dataset)
-        labeled_idx = [
-            i for i in range(len(dataset)) if dataset.index[i][2] is not None
-        ]
-        labeled_idx_set = set(labeled_idx)
-        unlabed_idx = [
-            i for i in range(len(dataset)) if i not in labeled_idx_set
-        ]
-
-        valid_labeled_idx = self.rng.choice(
-            labeled_idx,
-            round(cfg.labeled_valid_size * len(labeled_idx)),
-            replace=False,
-        ).tolist()
-        valid_unlabed_idx = self.rng.choice(
-            unlabed_idx,
-            round(cfg.unlabed_valid_size * len(unlabed_idx)),
-            replace=False,
-        ).tolist()
-        valid_labeled_idx_set = set(valid_labeled_idx)
-        valid_unlabed_idx_set = set(valid_unlabed_idx)
-        train_labeled_idx = [
-            i for i in labeled_idx if i not in valid_labeled_idx_set
-        ]
-        train_unlabed_idx = [
-            i for i in unlabed_idx if i not in valid_unlabed_idx_set
-        ]
-        # Sanity check
-        assert len(
-            valid_labeled_idx_set.union(valid_unlabed_idx_set)
-            .union(train_labeled_idx)
-            .union(train_unlabed_idx)
-        ) == len(dataset)
-
-        log.info(
-            f"TOTAL labeled size: {len(labeled_idx):,}, "
-            f"unlabed size: {len(unlabed_idx):,}, "
-            f"total: {len(labeled_idx) + len(unlabed_idx)}"
+        self.train_dataset, self.valid_dataset = random_split(
+            dataset, [1 - cfg.valid_size, cfg.valid_size]
         )
         log.info(
-            f"TRAIN labeled size: {len(train_labeled_idx):,}, "
-            f"unlabed size: {len(train_unlabed_idx):,}, "
-            f"total: {len(train_labeled_idx) + len(train_unlabed_idx)}"
-        )
-        log.info(
-            f"VALID labeled size: {len(valid_labeled_idx):,}, "
-            f"unlabed size: {len(valid_unlabed_idx):,}, "
-            f"total: {len(valid_labeled_idx) + len(valid_unlabed_idx)}"
-        )
-
-        self.train_dataset = Subset(
-            dataset, train_labeled_idx + train_unlabed_idx
-        )
-        self.valid_dataset = Subset(
-            dataset, valid_labeled_idx + valid_unlabed_idx
-        )
-
-        # Better safe than sorry
-        assert len(self.train_dataset) == len(train_labeled_idx) + len(
-            train_unlabed_idx
-        )
-        assert len(self.valid_dataset) == len(valid_labeled_idx) + len(
-            valid_unlabed_idx
-        )
-        assert len(self.train_dataset) + len(self.valid_dataset) == len(
-            dataset
+            f"train size: {len(self.train_dataset):,}, "
+            f"valid size: {len(self.valid_dataset):,}"
         )
 
         train_loader = DataLoader(
@@ -261,18 +207,7 @@ class Trainer:
         assert batch.txt.shape == (b, t)
         assert batch.txt_mask.shape == (b, t)
 
-        assert isinstance(batch.txt, torch.Tensor)
-        assert batch.txt.dtype == torch.long
-
-        labeled_mask = batch.txt_mask.sum(dim=-1) > 0
-        if (~labeled_mask).any():
-            self.seri.tick("encoder_generate")
-            txt = self.model.generate(batch.obs_embeds)
-            txt = torch.where(
-                rearrange(labeled_mask, "b -> b 1", b=b), batch.txt, txt
-            )
-        else:
-            txt = batch.txt
+        txt = self.model.generate(batch.obs_embeds, batch.txt, batch.txt_mask)
 
         self.seri.tick("encoder_forward")
         encoder_out = self.model(
@@ -304,28 +239,43 @@ class Trainer:
         inputs_embeds = encoded_input * prefix_mask + teacher_forcing
 
         predictor_out = self.model.predictor_llm(inputs_embeds=inputs_embeds)
-        logits = torch.where(
-            rearrange(labeled_mask, "b -> b 1 1"),
-            encoder_out.logits,
-            predictor_out.logits,
-        )
-        target_probs = F.softmax(encoder_out.logits.detach(), dim=-1)
-        target_probs = torch.where(
-            rearrange(labeled_mask, "b -> b 1 1"),
-            F.one_hot(txt, num_classes=encoder_out.logits.shape[-1]),
-            target_probs,
-        )
 
-        logits = rearrange(logits, "b t v -> (b t) v", b=b, t=t)
-        target_probs = rearrange(target_probs, "b t v -> (b t) v", b=b, t=t)
-        loss = F.cross_entropy(logits, target_probs, reduction="none")
-        loss = rearrange(loss, "(b t) -> b t 1", b=b, t=t)
-        assert loss.shape == prefix_mask.shape
-        loss = loss * ~prefix_mask
+        v = encoder_out.logits.shape[-1]
+        encoder_loss = F.cross_entropy(
+            rearrange(encoder_out.logits, "b t v -> (b t) v", b=b, t=t, v=v),
+            rearrange(batch.txt, "b t -> (b t)", b=b, t=t),
+            reduction="none",
+        )
+        encoder_loss = torch.where(
+            rearrange(batch.txt_mask, "b t -> (b t)", b=b, t=t),
+            encoder_loss,
+            0.0,
+        ).mean()
+
+        target_probs = torch.where(
+            rearrange(batch.txt_mask, "b t -> b t 1", b=b, t=t),
+            F.one_hot(txt, num_classes=v),
+            F.softmax(encoder_out.logits.detach(), dim=-1),
+        )
+        predictor_loss = torch.where(
+            rearrange(prefix_mask, "b t 1 -> (b t)", b=b, t=t),
+            0.0,
+            F.cross_entropy(
+                rearrange(
+                    predictor_out.logits, "b t v -> (b t) v", b=b, t=t, v=v
+                ),
+                rearrange(target_probs, "b t v -> (b t) v", b=b, t=t, v=v),
+                reduction="none",
+            ),
+        ).mean()
+
+        loss = encoder_loss + predictor_loss
 
         with torch.no_grad():
             self.seri.push(
-                loss=loss.mean(),
+                loss=loss,
+                loss_encoder=encoder_loss,
+                loss_predictor=predictor_loss,
                 encoder_entropy=torch.distributions.Categorical(
                     logits=rearrange(encoder_out.logits, "b t v -> (b t) v")
                 )
@@ -339,10 +289,6 @@ class Trainer:
                 encoder_proj_weight_std=self.model.encoder_proj.weight.std(),
                 predictor_proj_weight_std=self.model.predictor_proj.weight.std(),
             )
-        if labeled_mask.any():
-            self.seri.extend(loss_labeled=loss[labeled_mask].view(-1))
-        if (~labeled_mask).any():
-            self.seri.extend(loss_unlabed=loss[~labeled_mask].view(-1))
 
         return loss.mean()
 
